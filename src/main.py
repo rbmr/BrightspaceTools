@@ -95,6 +95,14 @@ class BrightspaceParser:
 
         root_node = Directory(name=course_name, children=children)
         root_node.save_json(course_root / "course_structure.json")
+        # Dropbox assignments and quizzes carry their own DueDate but are
+        # frequently not linked into the Content page at all, so they never
+        # show up as Topics in toc_data above. Fetch them directly instead.
+        deadlines = self._fetch_dropbox_deadlines(course_id) + self._fetch_quiz_deadlines(course_id)
+        with open(course_root / "deadlines.json", 'w', encoding='utf-8') as f:
+            json.dump(deadlines, f, indent=2)
+        if deadlines:
+            print(f"   Found {len(deadlines)} dropbox/quiz deadlines")
         print(f"\n[OK] Done! Exported to: {course_root}")
         return root_node
 
@@ -124,13 +132,20 @@ class BrightspaceParser:
         # Pass description to Directory model
         return Directory(name=title, description=description, children=children)
 
+    # Activity types that can carry grading/deadline semantics beyond plain
+    # Dropbox assignments (per the ACTIVITYTYPE_T enum in the Brightspace API
+    # docs): Quiz, DiscussionForum, DiscussionTopic, LTI, Checklist,
+    # SelfAssessment, Survey. DueDate is a property of the Topic itself, not
+    # specific to Dropbox, so any of these (or anything else carrying a
+    # DueDate) must not be silently dropped.
+    ASSIGNMENT_LIKE_TYPES = {3, 4, 5, 6, 7, 10, 11, 12}
+
     def _process_topic(self, topic_data: Dict, parent_path: Path) -> Optional[Node]:
         title = self._clean_name(topic_data.get('Title', 'Untitled Topic'))
         description = topic_data.get('Description', {}).get('Html', None)
         url = topic_data.get('Url', '')
+        due_date = topic_data.get('DueDate')
 
-        # KEY FIX: Use ActivityType and correct IDs
-        # 1 = File, 2 = Link, 3 = Dropbox (Assignments)
         activity_type = topic_data.get('ActivityType', -1)
 
         if activity_type == 1:  # File
@@ -146,12 +161,14 @@ class BrightspaceParser:
 
             return File(name=title, description=description, file=save_path)
 
-        elif activity_type == 2:  # Link
+        elif activity_type == 2 and not due_date:  # Plain Link, no deadline
             return Link(name=title, description=description, url=url)
 
-        elif activity_type == 3: # DropBox (Assignment)
-            due_date = topic_data.get('DueDate')
-            print(f"  📝  Found Assignment: {title}")
+        elif activity_type in self.ASSIGNMENT_LIKE_TYPES or due_date:
+            # Covers Dropbox, Quiz, DiscussionForum/Topic, LTI, Checklist,
+            # SelfAssessment, Survey, and any other type that happens to
+            # carry a due date (including a Link, hence the `or due_date`).
+            print(f"  📝  Found Assignment (type {activity_type}): {title}")
             return Assignment(
                 name=title,
                 description=description,
@@ -165,6 +182,33 @@ class BrightspaceParser:
             pass
 
         return None
+
+    def _fetch_dropbox_deadlines(self, course_id: str) -> List[Dict]:
+        for ver in ["1.82", "1.74", "1.50"]:
+            try:
+                data = self._get_json(f"/d2l/api/le/{ver}/{course_id}/dropbox/folders/")
+                if data is not None:
+                    return [
+                        {"name": f.get("Name"), "due_date": f.get("DueDate"), "type": "dropbox"}
+                        for f in data
+                    ]
+            except Exception:
+                continue
+        return []
+
+    def _fetch_quiz_deadlines(self, course_id: str) -> List[Dict]:
+        for ver in ["1.82", "1.74", "1.50"]:
+            try:
+                data = self._get_json(f"/d2l/api/le/{ver}/{course_id}/quizzes/")
+                if data is not None:
+                    objs = data.get("Objects", []) if isinstance(data, dict) else data
+                    return [
+                        {"name": q.get("Name"), "due_date": q.get("DueDate"), "type": "quiz"}
+                        for q in objs
+                    ]
+            except Exception:
+                continue
+        return []
 
     def _get_json(self, endpoint: str) -> Dict:
         url = f"{self.base_url}{endpoint}"
