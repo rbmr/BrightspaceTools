@@ -93,6 +93,7 @@ Once authenticated, you can scrape a specific course.
     * `linked_files/`: course files and images that pages, descriptions or posts link to but that are not topics of the table of contents (`_index.json` lists them). With `--md`, the links in the `.md` files are rewritten to point at these local copies.
     * `raw/`: the JSON of every other documented API route that answered, one file per request.
     * `_account/` (in the output root): the same for account-level routes, plus `user_feed.json`.
+    * `deadlines.json`: the due dates of dropbox folders and quizzes, which are often not linked into the content tree (topics with a due date, and quiz, discussion and similar topics, appear as assignments in `course_structure.json`).
     * `coverage.json`, `permission_warnings.json` and `unavailable_content.json`: what happened to every route and what could not be retrieved, see [Completeness](#completeness).
 
     **Good to know**
