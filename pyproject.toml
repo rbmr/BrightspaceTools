@@ -9,7 +9,6 @@ dependencies = [
     "markdownify>=1.2.3",
     "playwright>=1.57.0",
     "pydantic>=2.12.5",
-    "requests>=2.32.5",
     "typer>=0.21.1",
 ]
 
