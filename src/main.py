@@ -12,7 +12,7 @@ from typing import Optional, Dict, List
 import httpx
 import typer
 
-from api import Api, ScrapeError, cap_name, gather_all
+from api import Api, ScrapeError, cap_name, gather_all, path_of
 from crawler import Crawler
 from extras import CourseExtras, clean_name
 from linked_files import LinkedFiles
@@ -172,6 +172,8 @@ class BrightspaceParser:
                 print("[Linked files] course files that pages link to")
                 await LinkedFiles(api, course_root, toc_data, self.md is not None, self.html_pages).run()
                 watch.lap("linked files")
+            if not self.linked_only:
+                await self._save_deadlines(course_id, course_root)
         finally:
             self._save_report(course_root, crawler)
         if crawler and crawler.failures:
@@ -180,6 +182,23 @@ class BrightspaceParser:
 
         print(f"\n[OK] Done! Exported to: {course_root}")
         return root_node
+
+    async def _save_deadlines(self, course_id: str, course_root: Path):
+        """deadlines.json: dropbox folders and quizzes carry their own DueDate but are often not linked into the
+        content tree, so they never show up as topics. They are listed directly (the answers the extras already
+        fetched are reused)."""
+        api = self.api
+        folders_url, quizzes_url = api.le(course_id, "/dropbox/folders/"), api.le(course_id, "/quizzes/")
+        folders = api.seen.get(path_of(folders_url))
+        quizzes = api.seen.get(path_of(quizzes_url))
+        if folders is None or quizzes is None:  # the extras did not run (--toc-only)
+            folders, quizzes = await gather_all(api.json(folders_url), api.paged(quizzes_url))
+        deadlines = ([{"name": f.get("Name"), "due_date": f.get("DueDate"), "type": "dropbox"} for f in folders or []]
+                     + [{"name": q.get("Name"), "due_date": q.get("DueDate"), "type": "quiz"} for q in quizzes or []])
+        with open(course_root / "deadlines.json", "w", encoding="utf-8") as f:
+            json.dump(deadlines, f, indent=2, ensure_ascii=False)
+        if deadlines:
+            print(f"   Found {len(deadlines)} dropbox/quiz deadlines")
 
     async def _role(self, course_id: str) -> str:
         """The role the user has in this course: permissions (and so 403s) are shared by courses with the same role."""
@@ -258,12 +277,18 @@ class BrightspaceParser:
         # Pass description to Directory model
         return Directory(name=title, description=description, children=children)
 
+    # Activity types that can carry grading/deadline semantics beyond plain Dropbox assignments (per the ACTIVITYTYPE_T
+    # enum in the Brightspace API docs): Dropbox, Quiz, DiscussionForum, DiscussionTopic, LTI, Checklist,
+    # SelfAssessment, Survey. DueDate is a property of the topic itself, so none of these may be silently dropped.
+    ASSIGNMENT_LIKE_TYPES = {3, 4, 5, 6, 7, 10, 11, 12}
+
     async def _process_topic(self, topic_data: Dict, parent_path: Path) -> Optional[Node]:
         title = self._clean_name(topic_data.get('Title', 'Untitled Topic'))
         description = topic_data.get('Description', {}).get('Html', None)
         url = topic_data.get('Url', '')
+        due_date = topic_data.get('DueDate')
 
-        # 1 = File, 2 = Link, 3 = Dropbox (Assignments); other types are covered by the extras / toc_raw.json
+        # 1 = File, 2 = Link, assignment-like types (see above); the rest is covered by the extras / toc_raw.json
         activity_type = topic_data.get('ActivityType', -1)
 
         if self.md and description:
@@ -291,16 +316,18 @@ class BrightspaceParser:
 
             return File(name=title, description=description, file=save_path)
 
-        elif activity_type == 2:  # Link
+        elif activity_type == 2 and not due_date:  # Plain link, no deadline
             return Link(name=title, description=description, url=url)
 
-        elif activity_type == 3:  # DropBox (Assignment)
-            print(f"  [Assignment] Found: {title}")
+        elif activity_type in self.ASSIGNMENT_LIKE_TYPES or due_date:
+            # Covers Dropbox, Quiz, DiscussionForum/Topic, LTI, Checklist, SelfAssessment, Survey, and any other
+            # type that happens to carry a due date (including a link, hence the `or due_date`)
+            print(f"  [Assignment] Found (type {activity_type}): {title}")
             return Assignment(
                 name=title,
                 description=description,
                 url=url,
-                due_date=topic_data.get('DueDate')
+                due_date=due_date
             )
 
         print(f"  [Info] Topic type {activity_type} not downloaded from the TOC: {title} (see toc_raw.json)")
