@@ -2,3 +2,4 @@
 .venv
 auth.json
 downloads
+__pycache__/
