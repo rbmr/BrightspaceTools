@@ -80,10 +80,17 @@ class CourseExtras:
         await self.md.html_to_file(html, path, title=title)
 
     async def _download_files(self, files: Optional[List[Dict]], endpoint_for: Callable[[Dict], str], directory: Path):
-        await gather_all(*(
-            self.api.download(endpoint_for(file), directory / clean_name(file.get("FileName") or f"file_{file['FileId']}"))
-            for file in files or [] if file.get("FileId") is not None
-        ))
+        files = [f for f in files or [] if f.get("FileId") is not None]
+        names = [clean_name(f.get("FileName") or f"file_{f['FileId']}") for f in files]
+        taken = set()
+        targets = []
+        for file, name in zip(files, names):
+            if name.lower() in taken:  # same name twice in one list (e.g. several pasted image.png): keep both
+                stem, dot, ext = name.rpartition(".")
+                name = f"{stem}_{file['FileId']}.{ext}" if dot else f"{name}_{file['FileId']}"
+            taken.add(name.lower())
+            targets.append(directory / name)
+        await gather_all(*(self.api.download(endpoint_for(f), t) for f, t in zip(files, targets)))
 
     # ---------- entry point ----------
 
