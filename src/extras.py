@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote, unquote, urlparse
 
-from api import Api, cap_name, gather_all
+from api import Api, ScrapeError, cap_name, gather_all
 from markdown_export import MarkdownExporter
 
 CALENDAR_WINDOW = "startDateTime=1990-01-01T00:00:00.000Z&endDateTime=2100-01-01T00:00:00.000Z"
@@ -255,7 +255,10 @@ class CourseExtras:
             await gather_all(*(self._submission_entry(fid, entry, fdir) for entry in entries))
             if not _has_files(entries):
                 # the API shows nothing (403 or empty): what the website's submission history lists is still ours
-                await self._history_files(fid, group_ids, fdir)
+                try:
+                    await self._history_files(fid, group_ids, fdir)
+                except ScrapeError as e:  # a fallback must not abort the course
+                    print(f"    [Warning] submission history fallback failed, skipped: {e}")
 
         await gather_all(
             self._md(folder.get("CustomInstructions"), self.root / fdir / "instructions.md", title=folder.get("Name")),
@@ -306,13 +309,27 @@ class CourseExtras:
                 for file_id, name in links.items()
             ))
         if not found:
-            for gid in group_ids:
-                target = self.root / fdir / "submissions" / f"group_{gid}.zip"
-                if await self.api.download(self.le(f"/dropbox/folders/{fid}/group-submissions/{gid}/download"), target):
-                    with zipfile.ZipFile(target) as archive:
-                        empty = all(i.is_dir() or i.filename == "index.html" for i in archive.infolist())
-                    if empty:  # the group handed nothing in: the zip only holds its index.html
-                        target.unlink()
+            zips = [(self.le(f"/dropbox/folders/{fid}/group-submissions/{gid}/download"), f"group_{gid}.zip")
+                    for gid in group_ids] or [
+                (self.le(f"/dropbox/folders/{fid}/submissions/{self.user_id}/download"), f"user_{self.user_id}.zip")]
+            for endpoint, name in zips:
+                await self._zip_fallback(endpoint, self.root / fdir / "submissions" / name)
+
+    async def _zip_fallback(self, endpoint: str, target: Path):
+        """Last resort, never fatal: a zip of everything handed in. Kept only if it holds more than its index.html."""
+        try:
+            if not await self.api.download(endpoint, target, absent_ok=True):
+                return
+            try:
+                with zipfile.ZipFile(target) as archive:
+                    empty = all(i.is_dir() or i.filename == "index.html" for i in archive.infolist())
+            except zipfile.BadZipFile:
+                print(f"    [Warning] not a zip, dropped: {target.name}")
+                empty = True
+            if empty:  # nothing was handed in
+                target.unlink(missing_ok=True)
+        except ScrapeError as e:
+            print(f"    [Warning] zip fallback failed, skipped: {e}")
 
     def _history_url(self, fid: int, group_id: Optional[int]) -> str:
         group = f"&grpid={group_id}" if group_id else ""
