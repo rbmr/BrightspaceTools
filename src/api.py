@@ -29,7 +29,7 @@ class ScrapeError(Exception):
     pass
 
 
-MAX_NAME = 180  # Windows allows 255 per path component, and we add suffixes like " [123]" and ".part"
+MAX_NAME = 125  # ecryptfs (encrypted home) allows only ~143 per component; Windows 255; we add suffixes like " [123]" and ".part"
 
 
 def cap_name(name: str) -> str:
