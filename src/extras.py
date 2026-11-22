@@ -5,8 +5,10 @@ Error policy (see api.py): a 403 is recorded as a permission warning, any other 
 Every step fetches its routes concurrently, and the steps themselves run side by side.
 """
 
+import html
 import json
 import re
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -26,6 +28,13 @@ def clean_name(name: Any) -> str:
 
 def _labelled(name: Any, ident: Any) -> str:
     return f"{clean_name(name)} [{ident}]"
+
+
+def _has_files(entries: List[Dict]) -> bool:
+    return any(sub.get("Files") for entry in entries for sub in entry.get("Submissions") or [])
+
+
+HISTORY_LINK = re.compile(r"viewFile\.d2lfile/Database/([A-Za-z0-9]+)/([^\"'?<>\s]+)\?ou=")
 
 
 class CourseExtras:
@@ -238,7 +247,15 @@ class CourseExtras:
         async def submissions():
             entries = await self.api.json(self.le(f"/dropbox/folders/{fid}/submissions/mysubmissions/")) or []
             self._save(f"{fdir}/my_submissions.json", entries)
+            group_ids = []
+            if folder.get("GroupTypeId"):
+                group_ids = await self._my_group_ids(folder["GroupTypeId"])
+            if not _has_files(entries):
+                entries = await self._group_submissions(fid, group_ids, fdir) or entries
             await gather_all(*(self._submission_entry(fid, entry, fdir) for entry in entries))
+            if not _has_files(entries):
+                # the API shows nothing (403 or empty): what the website's submission history lists is still ours
+                await self._history_files(fid, group_ids, fdir)
 
         await gather_all(
             self._md(folder.get("CustomInstructions"), self.root / fdir / "instructions.md", title=folder.get("Name")),
@@ -249,6 +266,57 @@ class CourseExtras:
             ),
             submissions(),
         )
+
+    async def _my_group_ids(self, category_id: int) -> List[int]:
+        groups = await self.api.json(self.lp(f"/groupcategories/{category_id}/groups/")) or []
+        return [g["GroupId"] for g in groups if self.user_id in (g.get("Enrollments") or [])]
+
+    async def _group_submissions(self, fid: int, group_ids: List[int], fdir: Path) -> List[Dict]:
+        """mysubmissions can answer 403/[] for group dropboxes: ask for the submissions of our groups instead."""
+        entries: List[Dict] = []
+
+        async def one(gid: int):
+            data = await self.api.json(self.le(f"/dropbox/folders/{fid}/submissions/group/{gid}"), absent_ok=True)
+            self._save(f"{fdir}/group_submissions_{gid}.json", data)
+            found = data if isinstance(data, list) else [data] if data else []
+            for entry in found:
+                if "Submissions" not in entry and "Files" in entry:  # a bare submission rather than an entity entry
+                    entry = {"Entity": {"EntityType": "Group", "EntityId": gid}, "Submissions": [entry]}
+                entries.append(entry)
+
+        await gather_all(*(one(gid) for gid in group_ids))
+        return entries
+
+    async def _history_files(self, fid: int, group_ids: List[int], fdir: Path):
+        """Download what the website's submission history links to (viewFile.d2lfile), which the API may refuse.
+
+        Without a group, as for individual dropboxes, the page shows the user's own history. If it lists nothing and
+        we are in a group, the zip of the group's submissions is the last resort."""
+        found = 0
+        for gid in group_ids or [None]:
+            page = self._history_url(fid, gid)
+            resp = await self.api.get(page, absent_ok=True)
+            links = {}
+            for file_id, name in HISTORY_LINK.findall(html.unescape(resp.text) if resp is not None else ""):
+                links.setdefault(file_id, unquote(name))
+            found += len(links)
+            await gather_all(*(
+                self.api.download(f"/d2l/common/viewFile.d2lfile/Database/{file_id}/{quote(name)}?ou={self.course_id}",
+                                  self.root / fdir / "submissions" / "history" / file_id / clean_name(name))
+                for file_id, name in links.items()
+            ))
+        if not found:
+            for gid in group_ids:
+                target = self.root / fdir / "submissions" / f"group_{gid}.zip"
+                if await self.api.download(self.le(f"/dropbox/folders/{fid}/group-submissions/{gid}/download"), target):
+                    with zipfile.ZipFile(target) as archive:
+                        empty = all(i.is_dir() or i.filename == "index.html" for i in archive.infolist())
+                    if empty:  # the group handed nothing in: the zip only holds its index.html
+                        target.unlink()
+
+    def _history_url(self, fid: int, group_id: Optional[int]) -> str:
+        group = f"&grpid={group_id}" if group_id else ""
+        return f"/d2l/lms/dropbox/user/folders_history.d2l?db={fid}{group}&isprv=0&bp=0&ou={self.course_id}"
 
     async def _submission_entry(self, fid: int, entry: Dict, fdir: Path):
         entity = entry.get("Entity") or {}
