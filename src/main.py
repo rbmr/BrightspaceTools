@@ -285,7 +285,7 @@ class BrightspaceParser:
     async def _process_topic(self, topic_data: Dict, parent_path: Path) -> Optional[Node]:
         title = self._clean_name(topic_data.get('Title', 'Untitled Topic'))
         description = topic_data.get('Description', {}).get('Html', None)
-        url = topic_data.get('Url', '')
+        url = topic_data.get('Url') or ''  # the API sends null for some topics
         due_date = topic_data.get('DueDate')
 
         # 1 = File, 2 = Link, assignment-like types (see above); the rest is covered by the extras / toc_raw.json
@@ -293,6 +293,10 @@ class BrightspaceParser:
 
         if self.md and description:
             await self.md.html_to_file(description, parent_path / f"{title}.description.md", title=title)
+
+        if activity_type == 1 and not url:  # File topic without a URL: nothing to download
+            self.api.note_unavailable(f"topic:{title}", f"file topic has no URL: {title}")
+            return None
 
         if activity_type == 1:  # File
             file_name = self._get_filename_from_url(url) or f"{title}.pdf"
