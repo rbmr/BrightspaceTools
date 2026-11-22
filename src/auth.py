@@ -12,12 +12,7 @@ TOKEN_KEY = "D2L.Fetch.Tokens"
 def _read_fetch_token(page) -> str | None:
     """Return the D2L fetch access token if the SPA has written it yet."""
     try:
-        raw = page.evaluate(
-            "() => { for (const k of Object.keys(localStorage)) {"
-            " if (k === arguments[0]) return localStorage.getItem(k); }"
-            " return null; }",
-            TOKEN_KEY,
-        )
+        raw = page.evaluate("(key) => localStorage.getItem(key)", TOKEN_KEY)
     except Exception:
         return None
     if not raw:
