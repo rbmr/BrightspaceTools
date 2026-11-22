@@ -8,6 +8,7 @@ Every step fetches its routes concurrently, and the steps themselves run side by
 import html
 import json
 import re
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -275,7 +276,7 @@ class CourseExtras:
         entries: List[Dict] = []
 
         async def one(gid: int):
-            data = await self.api.json(self.le(f"/dropbox/folders/{fid}/submissions/group/{gid}"))
+            data = await self.api.json(self.le(f"/dropbox/folders/{fid}/submissions/group/{gid}"), absent_ok=True)
             self._save(f"{fdir}/group_submissions_{gid}.json", data)
             found = data if isinstance(data, list) else [data] if data else []
             for entry in found:
@@ -305,11 +306,13 @@ class CourseExtras:
                 for file_id, name in links.items()
             ))
         if not found:
-            await gather_all(*(
-                self.api.download(self.le(f"/dropbox/folders/{fid}/group-submissions/{gid}/download"),
-                                  self.root / fdir / "submissions" / f"group_{gid}.zip")
-                for gid in group_ids
-            ))
+            for gid in group_ids:
+                target = self.root / fdir / "submissions" / f"group_{gid}.zip"
+                if await self.api.download(self.le(f"/dropbox/folders/{fid}/group-submissions/{gid}/download"), target):
+                    with zipfile.ZipFile(target) as archive:
+                        empty = all(i.is_dir() or i.filename == "index.html" for i in archive.infolist())
+                    if empty:  # the group handed nothing in: the zip only holds its index.html
+                        target.unlink()
 
     def _history_url(self, fid: int, group_id: Optional[int]) -> str:
         group = f"&grpid={group_id}" if group_id else ""
