@@ -285,7 +285,7 @@ class BrightspaceParser:
     async def _process_topic(self, topic_data: Dict, parent_path: Path) -> Optional[Node]:
         title = self._clean_name(topic_data.get('Title', 'Untitled Topic'))
         description = topic_data.get('Description', {}).get('Html', None)
-        url = topic_data.get('Url', '')
+        url = topic_data.get('Url') or ''
         due_date = topic_data.get('DueDate')
 
         # 1 = File, 2 = Link, assignment-like types (see above); the rest is covered by the extras / toc_raw.json
@@ -298,6 +298,10 @@ class BrightspaceParser:
             file_name = self._get_filename_from_url(url) or f"{title}.pdf"
             save_path = parent_path / file_name
             download_url = f"{self.base_url}{url}"
+
+            if not url:
+                self.api.note_unavailable(f"topic {topic_data.get('TopicId')}", f"file topic has no URL: {title}")
+                return File(name=title, description=description, file=save_path)
 
             if url.startswith("d2l:"):
                 # Content Service media (e.g. lecture videos): the URL is an identifier, not a path
